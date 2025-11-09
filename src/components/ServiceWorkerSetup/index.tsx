@@ -1,12 +1,14 @@
 /* eslint-disable no-console */
+
 import useSettings from '@app/hooks/useSettings';
 import { useUser } from '@app/hooks/useUser';
-import axios from 'axios';
+import { verifyAndResubscribePushSubscription } from '@app/utils/pushSubscriptionHelpers';
 import { useEffect } from 'react';
 
 const ServiceWorkerSetup = () => {
-  const { currentSettings } = useSettings();
   const { user } = useUser();
+  const { currentSettings } = useSettings();
+
   useEffect(() => {
     if ('serviceWorker' in navigator && user?.id) {
       navigator.serviceWorker
@@ -17,32 +19,52 @@ const ServiceWorkerSetup = () => {
             registration.scope
           );
 
-          if (currentSettings.enablePushRegistration) {
-            const sub = await registration.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: currentSettings.vapidPublic,
-            });
+          const pushNotificationsEnabled =
+            localStorage.getItem('pushNotificationsEnabled') === 'true';
 
-            const parsedSub = JSON.parse(JSON.stringify(sub));
+          // Reset the notifications flag if permissions were revoked
+          if (
+            Notification.permission !== 'granted' &&
+            pushNotificationsEnabled
+          ) {
+            localStorage.setItem('pushNotificationsEnabled', 'false');
+            console.warn(
+              '[SW] Push permissions not granted — skipping resubscribe'
+            );
 
-            if (parsedSub.keys.p256dh && parsedSub.keys.auth) {
-              await axios.post('/api/v1/user/registerPushSubscription', {
-                endpoint: parsedSub.endpoint,
-                p256dh: parsedSub.keys.p256dh,
-                auth: parsedSub.keys.auth,
-              });
-            }
+            return;
+          }
+
+          // Bypass resubscribing if we have manually disabled push notifications
+          if (!pushNotificationsEnabled) {
+            return;
+          }
+
+          const subscription = await registration.pushManager.getSubscription();
+
+          console.log(
+            '[SW] Existing push subscription:',
+            subscription?.endpoint
+          );
+
+          const verified = await verifyAndResubscribePushSubscription(
+            user.id,
+            currentSettings
+          );
+
+          if (verified) {
+            console.log('[SW] Push subscription verified or refreshed.');
+          } else {
+            console.warn(
+              '[SW] Push subscription verification failed or not available.'
+            );
           }
         })
         .catch(function (error) {
           console.log('[SW] Service worker registration failed, error:', error);
         });
     }
-  }, [
-    user,
-    currentSettings.vapidPublic,
-    currentSettings.enablePushRegistration,
-  ]);
+  }, [currentSettings, user]);
   return null;
 };
 
